@@ -28,6 +28,7 @@ out/
 build
 dist
 target
+target-linaro
 
 
 # Debug
