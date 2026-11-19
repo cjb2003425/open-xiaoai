@@ -1,6 +1,3 @@
-> [!WARNING]
-> 本项目已停止维护，不再提供更新与支持，感谢大家的使用。
-
 # Open-XiaoAI
 
 让小爱音箱「听见你的声音」，解锁无限可能。
@@ -27,6 +24,29 @@
 
 **未来由你定义!**
 
+## 本 Fork 的主要改动
+
+本 Fork 在保留 Open-XiaoAI 原有功能的基础上，增加了针对 **L06A（固件 1.88.55）** 的音频接入与原生唤醒接管能力：
+
+- 通过 `LD_PRELOAD` 旁路复制小米音频前端处理后的 16 kHz、单声道、S16LE PCM
+- Rust Client 新增 `pcm_tap` 录音后端，通过现有 WebSocket 协议向 Server 转发音频
+- 保留音箱原生“小爱同学”关键词检测和原生“我在”回应
+- 捕获原生唤醒标记后，立即终止后续小米会话并发送 `native_kws` 事件
+- Server 端关闭重复的关键词检测，但继续执行 VAD 和本地 ASR
+- 提供 `blocked` / `takeover` 两种原生唤醒模式，以及固件校验、健康检查和回滚工具
+
+L06A 接管流程：
+
+```text
+“小爱同学” → 音箱原生“我在” → Client 接管小米后续会话
+→ PCM 发送到 Server → Server VAD + 本地 ASR → AI 服务 → 音箱播放回答
+```
+
+用户问题由 Server 从 PCM 音频中进行本地 ASR，不使用小米云端 ASR。Server 不限定特定硬件或操作系统，只需满足所选服务端程序的运行依赖。
+
+> [!IMPORTANT]
+> L06A 支持仅在固件 **1.88.55** 上验证。L06A 不适用下方 LX06/OH2P 的补丁固件和刷机步骤，请勿混用。
+
 ## 你的声音 + 小爱音箱 = 无限可能
 
 👉 [小爱音箱接入小智 AI 演示视频](https://www.bilibili.com/video/BV1TxJhzvEhz)
@@ -43,6 +63,8 @@
 
 ## 快速开始
 
+### LX06 / OH2P 原有方案
+
 > [!IMPORTANT]
 > 本教程仅适用于 **小爱音箱 Pro（LX06）** 和 **Xiaomi 智能音箱 Pro（OH2P）** 这两款机型，**其他型号**的小爱音箱请勿直接使用！🚨
 
@@ -58,6 +80,24 @@
    - 👉 [小爱音箱组立体声（支持不同型号机型）](examples/stereo/README.md)
 
 以上皆为抛砖引玉，你也可以亲手编写自己想要的功能，一切由你定义！
+
+### L06A 定制方案
+
+L06A 方案不刷写本仓库提供的 LX06/OH2P 补丁固件，而是在已验证的 1.88.55 系统上部署以下组件：
+
+1. 使用 [L06A PCM Tap](packages/client-rust/tap/) 从原生音频前端旁路取得处理后的 PCM
+2. 构建并部署 [Rust Client](packages/client-rust/README.md)，启用 `pcm_tap` 音频源
+3. 在任意满足依赖的主机上运行兼容的 Server，接收 `record` 音频流和 `native_kws` 事件
+4. Server 保持音频输入、VAD 和本地 ASR 启用，同时关闭 Server 端重复的关键词检测
+5. 完成临时验证后，将音箱端模式从 fail-closed 的 `blocked` 切换为 `takeover`
+
+开始部署前请先阅读：
+
+- [L06A PCM Tap 设计](docs/superpowers/specs/2026-11-18-l06a-dnn-pcm-tap-design.md)
+- [L06A PCM Tap 实施计划](docs/superpowers/plans/2026-11-18-l06a-dnn-pcm-tap-implementation.md)
+- [原生唤醒阻断设计](docs/superpowers/specs/2026-11-18-block-native-xiaoai-wake-design.md)
+
+`blocked` 模式会保留 PCM tap，但阻止原生关键词检测；`takeover` 模式允许音箱原生 KWS 产生唤醒标记，再由 Client 终止后续小米流程。只有在 Client、PCM ring、Server 连接和回滚路径全部验证通过后，才应持久化 `takeover`。
 
 ## 相关项目
 
