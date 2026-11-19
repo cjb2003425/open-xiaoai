@@ -325,6 +325,7 @@ name = "open-xiaoai"
 version = "1.0.0"
 dependencies = [
  "futures",
+ "libc",
  "rand",
  "serde",
  "serde_json",

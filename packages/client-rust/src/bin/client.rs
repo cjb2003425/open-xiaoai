@@ -1,7 +1,9 @@
 use open_xiaoai::services::audio::config::AudioConfig;
 use open_xiaoai::services::monitor::kws::KwsMonitor;
 use serde_json::json;
+use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::Mutex;
 use tokio::time::sleep;
 use tokio_tungstenite::connect_async;
 
@@ -14,6 +16,9 @@ use open_xiaoai::services::connect::handler::MessageHandler;
 use open_xiaoai::services::connect::message::{MessageManager, WsStream};
 use open_xiaoai::services::connect::rpc::RPC;
 use open_xiaoai::services::monitor::instruction::InstructionMonitor;
+use open_xiaoai::services::monitor::native_wake::{
+    execute_native_wake, native_wake_plan, DialogDeduper,
+};
 use open_xiaoai::services::monitor::playing::PlayingMonitor;
 
 struct AppClient {
@@ -39,6 +44,7 @@ impl AppClient {
     pub async fn run(&mut self) {
         let url = std::env::args().nth(1).expect("❌ 请输入服务器地址");
         println!("✅ 已启动");
+        self.start_instruction_monitor().await;
         loop {
             let Ok(ws_stream) = self.connect(&url).await else {
                 sleep(Duration::from_secs(1)).await;
@@ -52,6 +58,49 @@ impl AppClient {
             self.dispose().await;
             eprintln!("❌ 已断开连接");
         }
+    }
+
+    async fn start_instruction_monitor(&mut self) {
+        let deduper = Arc::new(Mutex::new(DialogDeduper::new()));
+        self.instruction_monitor
+            .start(move |event| {
+                let deduper = deduper.clone();
+                async move {
+                    let manager = MessageManager::instance();
+                    let connected = manager.is_connected();
+                    let generation = manager.connection_generation();
+                    let plan = {
+                        let mut deduper = deduper.lock().await;
+                        native_wake_plan(&event, connected, &mut deduper)
+                    };
+
+                    if let Some(plan) = plan {
+                        let payload = execute_native_wake(plan, |command| async move {
+                            open_xiaoai::utils::shell::run_shell(&command).await
+                        })
+                        .await;
+                        if connected
+                            && manager.is_connected()
+                            && manager.connection_generation() == generation
+                        {
+                            manager
+                                .send_event("native_kws", Some(json!(payload)))
+                                .await?;
+                        }
+                    }
+
+                    if connected
+                        && manager.is_connected()
+                        && manager.connection_generation() == generation
+                    {
+                        manager
+                            .send_event("instruction", Some(json!(event)))
+                            .await?;
+                    }
+                    Ok(())
+                }
+            })
+            .await;
     }
 
     async fn init(&mut self, ws_stream: WsStream) {
@@ -70,14 +119,6 @@ impl AppClient {
         rpc.add_command("stop_play", stop_play).await;
         rpc.add_command("start_recording", start_recording).await;
         rpc.add_command("stop_recording", stop_recording).await;
-
-        self.instruction_monitor
-            .start(|event| async move {
-                MessageManager::instance()
-                    .send_event("instruction", Some(json!(event)))
-                    .await
-            })
-            .await;
 
         self.playing_monitor
             .start(|event| async move {
@@ -100,7 +141,6 @@ impl AppClient {
         MessageManager::instance().dispose().await;
         let _ = AudioPlayer::instance().stop().await;
         let _ = AudioRecorder::instance().stop_recording().await;
-        self.instruction_monitor.stop().await;
         self.playing_monitor.stop().await;
         self.kws_monitor.stop().await;
     }

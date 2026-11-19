@@ -2,6 +2,7 @@ use futures::stream::{SplitSink, SplitStream};
 use futures::{SinkExt, StreamExt};
 use serde_json::Value;
 use std::future::Future;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock};
 use tokio::net::TcpStream;
 use tokio::sync::{Mutex, Semaphore};
@@ -34,6 +35,8 @@ pub struct MessageManager {
     semaphore: Arc<Semaphore>,
     reader: Arc<Mutex<Option<WsReader>>>,
     writer: Arc<Mutex<Option<WsWriter>>>,
+    connected: AtomicBool,
+    connection_generation: AtomicU64,
 }
 
 static INSTANCE: LazyLock<MessageManager> = LazyLock::new(MessageManager::new);
@@ -44,6 +47,8 @@ impl MessageManager {
             reader: Arc::new(Mutex::new(None)),
             writer: Arc::new(Mutex::new(None)),
             semaphore: Arc::new(Semaphore::new(32)),
+            connected: AtomicBool::new(false),
+            connection_generation: AtomicU64::new(0),
         }
     }
 
@@ -64,6 +69,8 @@ impl MessageManager {
                 self.writer.lock().await.replace(WsWriter::Server(tx));
             }
         }
+        self.connection_generation.fetch_add(1, Ordering::SeqCst);
+        self.connected.store(true, Ordering::SeqCst);
         RPC::instance()
             .init(|request| async {
                 let data = serde_json::to_string(&AppMessage::Request(request)).unwrap();
@@ -75,10 +82,20 @@ impl MessageManager {
     }
 
     pub async fn dispose(&self) {
+        self.connected.store(false, Ordering::SeqCst);
+        self.connection_generation.fetch_add(1, Ordering::SeqCst);
         *self.reader.lock().await = None;
         *self.writer.lock().await = None;
         RPC::instance().dispose().await;
         TaskManager::instance().dispose("MessageManager").await;
+    }
+
+    pub fn is_connected(&self) -> bool {
+        self.connected.load(Ordering::SeqCst)
+    }
+
+    pub fn connection_generation(&self) -> u64 {
+        self.connection_generation.load(Ordering::SeqCst)
     }
 
     pub async fn send(&self, msg: Message) -> Result<(), AppError> {

@@ -11,6 +11,7 @@ use tokio::time::timeout;
 use crate::base::AppError;
 
 use super::config::{AudioConfig, AUDIO_CONFIG};
+use super::pcm_tap::{PcmTapReader, DEFAULT_RING_PATH};
 
 #[derive(PartialEq)]
 enum State {
@@ -74,6 +75,11 @@ impl AudioRecorder {
         }
 
         let requested_config = config.unwrap_or_else(|| (*AUDIO_CONFIG).clone());
+        if std::env::var("OPEN_XIAOAI_AUDIO_SOURCE").as_deref() == Ok("pcm_tap") {
+            drop(state);
+            return self.start_pcm_tap(on_stream, requested_config).await;
+        }
+
         let capture_config = capture_config_for_recording(&requested_config);
         let mut arecord_thread = spawn_arecord(&capture_config)?;
 
@@ -96,8 +102,11 @@ impl AudioRecorder {
                         while accumulated_data.len() >= target_size {
                             let data_to_send =
                                 accumulated_data.drain(..target_size).collect::<Vec<u8>>();
-                            let data_to_send =
-                                transform_stream_chunk(data_to_send, &requested_config, &capture_config);
+                            let data_to_send = transform_stream_chunk(
+                                data_to_send,
+                                &requested_config,
+                                &capture_config,
+                            );
                             if !data_to_send.is_empty() {
                                 let _ = on_stream(data_to_send).await;
                             }
@@ -114,6 +123,46 @@ impl AudioRecorder {
         self.read_thread.lock().await.replace(read_thread);
 
         *state = State::Recording;
+        Ok(())
+    }
+
+    async fn start_pcm_tap<F, Fut>(&self, on_stream: F, config: AudioConfig) -> Result<(), AppError>
+    where
+        F: Fn(Vec<u8>) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<(), AppError>> + Send + 'static,
+    {
+        if config.sample_rate != 16_000 || config.channels != 1 || config.bits_per_sample != 16 {
+            return Err("pcm_tap only supports 16 kHz mono S16LE".into());
+        }
+        let path =
+            std::env::var("OPEN_XIAOAI_PCM_RING").unwrap_or_else(|_| DEFAULT_RING_PATH.to_string());
+        let mut reader = PcmTapReader::open(path)?;
+        let target_size = config.buffer_size.max(1) as usize * 2;
+        let read_thread = tokio::spawn(async move {
+            let mut accumulated = Vec::with_capacity(target_size * 2);
+            loop {
+                match reader.next_block() {
+                    Ok(Some(block)) => {
+                        accumulated.extend_from_slice(&block);
+                        while accumulated.len() >= target_size {
+                            let chunk = accumulated.drain(..target_size).collect::<Vec<u8>>();
+                            if let Err(error) = on_stream(chunk).await {
+                                eprintln!("❌ PCM tap stream failed: {error}");
+                                std::process::exit(1);
+                            }
+                        }
+                    }
+                    Ok(None) => tokio::time::sleep(Duration::from_millis(5)).await,
+                    Err(error) => {
+                        eprintln!("❌ PCM tap failed closed: {error}");
+                        std::process::exit(1);
+                    }
+                }
+            }
+        });
+
+        self.read_thread.lock().await.replace(read_thread);
+        *self.state.lock().await = State::Recording;
         Ok(())
     }
 }

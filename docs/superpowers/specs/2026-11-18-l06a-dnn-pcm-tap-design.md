@@ -76,7 +76,10 @@ The temporary validation must confirm:
 - unloading the probe restores the exact original PNS startup path.
 
 Temporary assets live under `/tmp/open-xiaoai-tap/`. A temporary bind mount
-may shadow `/etc/init.d/pns`; the squashfs file itself must never be modified.
+may shadow `/etc/rc.d/S55pns`; the squashfs file itself must never be modified.
+This firmware stores `S55pns` as an independent copy rather than a symlink to
+`/etc/init.d/pns`, and procd registers the service under the invoked basename,
+so both injection and lifecycle control must use the `S55pns` path.
 The temporary test must restore the original PNS service whether validation
 succeeds or fails.
 
